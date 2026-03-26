@@ -223,8 +223,7 @@
     mdsLink.href = mdsUrl;
     mdsLink.textContent = mdsUrl;
 
-    document.getElementById('stop-cmd').textContent = info.stopScript;
-    document.getElementById('start-cmd').textContent = info.startScript;
+    document.getElementById('control-cmd').textContent = info.controlPanel;
     document.getElementById('java-cmd').textContent = info.javaCmd;
   }
 
