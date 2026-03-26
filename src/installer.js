@@ -360,7 +360,7 @@ set "JAR=${jarPath}"
 set "PIDFILE=${pidFile}"
 set "MDS_PORT=${mdsPort}"
 set "PORT=${port}"
-set "JAVA_ARGS=-jar "${jarPath}"${buildWinArgs(config)}"
+set JAVA_ARGS=-jar "${jarPath}"${buildWinArgs(config)}
 
 :menu
 cls
@@ -416,7 +416,7 @@ if exist "%PIDFILE%" (
   )
 )
 echo   Starting Minima...
-start "Minima Node" /min cmd /c ""%JAVA%" %JAVA_ARGS% & echo. & echo Minima has stopped. Press any key to close. & pause >nul"
+start "Minima Node" /min cmd /c ""%JAVA%" %JAVA_ARGS% ^& echo. ^& echo Minima has stopped. Press any key to close. ^& pause >nul"
 REM Wait a moment then find the PID
 timeout /t 3 /nobreak >nul
 for /f "tokens=2" %%i in ('tasklist /FI "WINDOWTITLE eq Minima Node" /NH 2^>nul ^| find /i "cmd"') do (
@@ -548,13 +548,19 @@ call "Minima.bat"
   return shortcutPath;
 }
 
-function launchMinimaWin(javaCmd) {
+function launchMinimaWin(javaCmd, installDir) {
+  // Write a small launcher script and execute it — avoids quoting issues with execSync + start
+  const launcherPath = path.join(installDir, 'start-minima.bat');
+  const launcher = `@echo off\r\nstart "Minima Node" /min cmd /c "${javaCmd}"\r\n`;
+  fs.writeFileSync(launcherPath, launcher);
+
   try {
-    // Start Minima in a minimized cmd window
-    execSync(`start "Minima Node" /min cmd /c "${javaCmd}"`, { encoding: 'utf8', shell: 'cmd.exe' });
+    spawn('cmd.exe', ['/c', launcherPath], { detached: true, stdio: 'ignore' }).unref();
     return true;
   } catch (err) {
-    throw new Error(`Failed to start Minima: ${err.message}`);
+    // Non-fatal — the control panel can start it later
+    console.error('Warning: Could not auto-start Minima:', err.message);
+    return false;
   }
 }
 
@@ -589,7 +595,7 @@ async function install(config, sendEvent) {
     }
 
     sendEvent('status', 'Starting Minima...');
-    launchMinimaWin(javaCmd);
+    launchMinimaWin(javaCmd, installDir);
 
     sendEvent('status', 'Creating desktop shortcut...');
     createDesktopShortcutWin(installDir);
