@@ -6,6 +6,10 @@
 
 # Don't use set -e — we handle errors explicitly so Homebrew output doesn't kill the script
 
+# Prevent Homebrew from running its massive auto-update during installs
+export HOMEBREW_NO_AUTO_UPDATE=1
+export HOMEBREW_NO_INSTALL_CLEANUP=1
+
 # Colors for friendly output
 GREEN='\033[0;32m'
 AMBER='\033[0;33m'
