@@ -95,11 +95,21 @@ if "$TMUX" has-session -t "$SESSION" 2>/dev/null; then
 fi
 
 # Start Minima in a new tmux session
-"$TMUX" new-session -d -s "$SESSION" '${javaCmd}'
+# The shell stays open after Minima exits so you can see any errors
+"$TMUX" new-session -d -s "$SESSION" '${javaCmd}; echo ""; echo "Minima has stopped. Press Enter to close this session."; read'
 
-echo "Minima started in tmux session '$SESSION'"
-echo "To view: tmux attach -t $SESSION"
-echo "To detach: press Ctrl+B then D"
+# Give it a moment to start
+sleep 2
+
+# Verify the session is still running
+if "$TMUX" has-session -t "$SESSION" 2>/dev/null; then
+  echo "Minima started in tmux session '$SESSION'"
+  echo "To view: tmux attach -t $SESSION"
+  echo "To detach: press Ctrl+B then D"
+else
+  echo "ERROR: Minima failed to start. Check the logs for details."
+  exit 1
+fi
 `;
 
   const scriptPath = path.join(installDir, 'start-minima.sh');
