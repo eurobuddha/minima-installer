@@ -1,7 +1,8 @@
 const express = require('express');
 const path = require('path');
+const os = require('os');
 const { execSync } = require('child_process');
-const { runPreflight } = require('./preflight');
+const { runPreflight, isWindows } = require('./preflight');
 const { install } = require('./installer');
 
 function startServer(port) {
@@ -30,19 +31,25 @@ function startServer(port) {
 
     install(config, sendEvent)
       .then(() => {
-        // Give client time to process the complete event, then open MDS + control panel
         setTimeout(async () => {
-          const homeDir = process.env.HOME;
+          const homeDir = os.homedir();
           const mdsPort = (parseInt(config.port) || 9001) + 2;
-          const controlPanel = path.join(homeDir, 'minima-installer', 'Minima.command');
 
+          // Open MDS Hub in browser
           try {
             const open = (await import('open')).default;
             await open(`https://localhost:${mdsPort}`);
           } catch {}
 
+          // Open control panel
           try {
-            execSync(`open "${controlPanel}"`);
+            if (isWindows) {
+              const controlPanel = path.join(homeDir, 'minima-installer', 'Minima.bat');
+              execSync(`start "" "${controlPanel}"`, { shell: 'cmd.exe' });
+            } else {
+              const controlPanel = path.join(homeDir, 'minima-installer', 'Minima.command');
+              execSync(`open "${controlPanel}"`);
+            }
           } catch {}
 
           console.log('\nInstallation complete. Shutting down wizard...');

@@ -2,8 +2,9 @@ const https = require('https');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { execSync, spawn } = require('child_process');
-const { runPreflight } = require('./preflight');
+const { runPreflight, isWindows } = require('./preflight');
 
 const JAR_URL = 'https://github.com/minima-global/Minima/raw/master/jar/minima.jar';
 
@@ -55,10 +56,13 @@ function downloadJar(destDir, onProgress) {
   });
 }
 
-function generateControlPanel(config, installDir) {
+// ============================================================
+//  Build the java command args (shared across platforms)
+// ============================================================
+
+function buildJavaArgs(config, installDir) {
   const preflight = runPreflight();
   const javaPath = preflight.java.path || 'java';
-  const tmuxPath = preflight.tmux.path || 'tmux';
   const jarPath = path.join(installDir, 'minima.jar');
 
   let args = [`-jar "${jarPath}"`];
@@ -78,6 +82,17 @@ function generateControlPanel(config, installDir) {
 
   const javaCmd = `"${javaPath}" ${args.join(' ')}`;
   const mdsPort = (parseInt(config.port) || 9001) + 2;
+
+  return { javaPath, jarPath, javaCmd, mdsPort, preflight };
+}
+
+// ============================================================
+//  macOS: Control Panel (.command), LaunchAgent, .app shortcut
+// ============================================================
+
+function generateControlPanelMac(config, installDir) {
+  const { javaPath, jarPath, javaCmd, mdsPort, preflight } = buildJavaArgs(config, installDir);
+  const tmuxPath = preflight.tmux.path || 'tmux';
 
   const script = `#!/bin/bash
 # ============================================================
@@ -222,11 +237,10 @@ done
   return { scriptPath, javaCmd, mdsPort };
 }
 
-function generateLaunchAgent(installDir, javaCmd) {
-  // LaunchAgent needs a simple start-only script (no interactive menu)
-  const startScript = path.join(installDir, 'start-minima-daemon.sh');
+function generateLaunchAgentMac(installDir, javaCmd) {
   const preflight = runPreflight();
   const tmuxPath = preflight.tmux.path || 'tmux';
+  const startScript = path.join(installDir, 'start-minima-daemon.sh');
 
   const daemonScript = `#!/bin/bash
 SESSION="minima"
@@ -259,19 +273,18 @@ fi
 </dict>
 </plist>`;
 
-  const plistDir = path.join(process.env.HOME, 'Library', 'LaunchAgents');
+  const plistDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
   fs.mkdirSync(plistDir, { recursive: true });
   const plistPath = path.join(plistDir, 'com.minima.node.plist');
   fs.writeFileSync(plistPath, plist);
   return plistPath;
 }
 
-function createDesktopShortcut(installDir) {
-  const homeDir = process.env.HOME;
+function createDesktopShortcutMac(installDir) {
+  const homeDir = os.homedir();
   const desktopDir = path.join(homeDir, 'Desktop');
   const controlPanel = path.join(installDir, 'Minima.command');
 
-  // Create a minimal .app bundle — this can live on Desktop AND be dragged to the Dock
   const appDir = path.join(desktopDir, 'Minima.app');
   const contentsDir = path.join(appDir, 'Contents');
   const macosDir = path.join(contentsDir, 'MacOS');
@@ -280,7 +293,6 @@ function createDesktopShortcut(installDir) {
   fs.mkdirSync(macosDir, { recursive: true });
   fs.mkdirSync(resourcesDir, { recursive: true });
 
-  // Info.plist
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -303,18 +315,14 @@ function createDesktopShortcut(installDir) {
 </plist>`;
   fs.writeFileSync(path.join(contentsDir, 'Info.plist'), plist);
 
-  // Executable — opens the .command file in Terminal
   const executable = `#!/bin/bash
 open -a Terminal "${controlPanel}"
 `;
-  const execPath = path.join(macosDir, 'Minima');
-  fs.writeFileSync(execPath, executable, { mode: 0o755 });
+  fs.writeFileSync(path.join(macosDir, 'Minima'), executable, { mode: 0o755 });
 
-  // Copy the Minima icon into the app bundle
   try {
     const icnsSource = path.join(__dirname, '..', 'assets', 'minima.icns');
-    const icnsDest = path.join(resourcesDir, 'minima.icns');
-    fs.copyFileSync(icnsSource, icnsDest);
+    fs.copyFileSync(icnsSource, path.join(resourcesDir, 'minima.icns'));
   } catch {}
 
   return appDir;
@@ -324,9 +332,7 @@ function launchTmuxSession(javaCmd) {
   const preflight = runPreflight();
   const tmuxPath = preflight.tmux.path || 'tmux';
   try {
-    // Launch directly — no intermediate script needed
     execSync(`"${tmuxPath}" new-session -d -s minima '${javaCmd}; echo ""; echo "Minima has stopped. Press Enter to close."; read'`, { encoding: 'utf8' });
-    // Verify it started
     execSync(`sleep 2 && "${tmuxPath}" has-session -t minima`, { encoding: 'utf8' });
     return true;
   } catch (err) {
@@ -334,8 +340,230 @@ function launchTmuxSession(javaCmd) {
   }
 }
 
+// ============================================================
+//  Windows: Control Panel (.bat), Startup folder, desktop .bat
+// ============================================================
+
+function generateControlPanelWin(config, installDir) {
+  const { javaPath, jarPath, javaCmd, mdsPort } = buildJavaArgs(config, installDir);
+  const pidFile = path.join(installDir, 'minima.pid');
+  const port = config.port || '9001';
+
+  // On Windows, we use javaw for background and save PID via wmic
+  // For "view", we start java (not javaw) in a visible window
+  const script = `@echo off
+setlocal enabledelayedexpansion
+title Minima Node - Control Panel
+
+set "JAVA=${javaPath}"
+set "JAR=${jarPath}"
+set "PIDFILE=${pidFile}"
+set "MDS_PORT=${mdsPort}"
+set "PORT=${port}"
+set "JAVA_ARGS=-jar "${jarPath}"${buildWinArgs(config)}"
+
+:menu
+cls
+echo.
+echo   * Minima Node
+echo   ---------------------------------
+echo.
+
+REM Check if running
+set "STATUS=Stopped"
+set "STATUSCOLOR=[91m"
+if exist "%PIDFILE%" (
+  set /p PID=<"%PIDFILE%"
+  tasklist /FI "PID eq !PID!" /NH 2>nul | find /i "java" >nul
+  if !errorlevel! equ 0 (
+    set "STATUS=Running (port %PORT%)"
+    set "STATUSCOLOR=[92m"
+  ) else (
+    del "%PIDFILE%" 2>nul
+  )
+)
+echo   Status: !STATUSCOLOR!!STATUS![0m
+echo.
+echo   1) Start node
+echo   2) Stop node
+echo   3) Restart node
+echo   4) View node (open log window)
+echo   5) Open MDS Hub in browser
+echo   6) Exit
+echo.
+set /p "choice=  Choose [1-6]: "
+
+if "%choice%"=="1" goto do_start
+if "%choice%"=="2" goto do_stop
+if "%choice%"=="3" goto do_restart
+if "%choice%"=="4" goto do_view
+if "%choice%"=="5" goto do_open_mds
+if "%choice%"=="6" goto do_exit
+echo   Invalid choice.
+pause >nul
+goto menu
+
+:do_start
+echo.
+if exist "%PIDFILE%" (
+  set /p PID=<"%PIDFILE%"
+  tasklist /FI "PID eq !PID!" /NH 2>nul | find /i "java" >nul
+  if !errorlevel! equ 0 (
+    echo   * Minima is already running.
+    echo.
+    pause
+    goto menu
+  )
+)
+echo   Starting Minima...
+start "Minima Node" /min cmd /c ""%JAVA%" %JAVA_ARGS% & echo. & echo Minima has stopped. Press any key to close. & pause >nul"
+REM Wait a moment then find the PID
+timeout /t 3 /nobreak >nul
+for /f "tokens=2" %%i in ('tasklist /FI "WINDOWTITLE eq Minima Node" /NH 2^>nul ^| find /i "cmd"') do (
+  echo %%i> "%PIDFILE%"
+)
+REM Also try to find java process
+for /f "tokens=2" %%i in ('wmic process where "commandline like '%%minima.jar%%'" get processid /value 2^>nul ^| find "="') do (
+  echo %%i> "%PIDFILE%"
+)
+if exist "%PIDFILE%" (
+  echo   [92m✓[0m Minima started successfully.
+) else (
+  echo   [91m✗[0m Minima may have failed to start. Choose 'View node' to check.
+)
+echo.
+pause
+goto menu
+
+:do_stop
+echo.
+if not exist "%PIDFILE%" (
+  echo   * Minima is not running.
+  echo.
+  pause
+  goto menu
+)
+echo   Stopping Minima...
+REM Kill all java processes running minima.jar
+for /f "tokens=2" %%i in ('wmic process where "commandline like '%%minima.jar%%'" get processid /value 2^>nul ^| find "="') do (
+  taskkill /PID %%i /F >nul 2>nul
+)
+del "%PIDFILE%" 2>nul
+echo   [92m✓[0m Minima stopped.
+echo.
+pause
+goto menu
+
+:do_restart
+call :do_stop_silent
+goto do_start
+
+:do_stop_silent
+if not exist "%PIDFILE%" goto :eof
+for /f "tokens=2" %%i in ('wmic process where "commandline like '%%minima.jar%%'" get processid /value 2^>nul ^| find "="') do (
+  taskkill /PID %%i /F >nul 2>nul
+)
+del "%PIDFILE%" 2>nul
+timeout /t 2 /nobreak >nul
+goto :eof
+
+:do_view
+echo.
+REM Start a visible java window so the user can see output
+echo   Opening Minima in a new window...
+echo   Close that window to stop the node.
+echo.
+start "Minima Node" cmd /c ""%JAVA%" %JAVA_ARGS% & echo. & echo Minima has stopped. Press any key to close. & pause >nul"
+pause
+goto menu
+
+:do_open_mds
+echo.
+echo   Opening MDS Hub at https://localhost:%MDS_PORT%
+echo   You may see a certificate warning - that's normal.
+echo.
+start https://localhost:%MDS_PORT%
+pause
+goto menu
+
+:do_exit
+echo.
+echo   Goodbye!
+echo.
+exit /b 0
+`;
+
+  const scriptPath = path.join(installDir, 'Minima.bat');
+  fs.writeFileSync(scriptPath, script);
+  return { scriptPath, javaCmd, mdsPort };
+}
+
+function buildWinArgs(config) {
+  let args = '';
+  if (config.port && config.port !== '9001') args += ` -port ${config.port}`;
+  if (config.dataFolder && config.dataFolder !== '~/.minima') args += ` -data ${config.dataFolder}`;
+  if (config.mdsEnable !== false) args += ' -mdsenable';
+  if (config.mdsPassword) args += ` -mdspassword "${config.mdsPassword}"`;
+  if (config.rpcEnable) args += ' -rpcenable';
+  if (config.rpcPassword) args += ` -rpcpassword "${config.rpcPassword}"`;
+  if (config.desktopMode !== false) args += ' -desktop';
+  if (config.noP2P) args += ' -nop2p';
+  if (config.connectNode) args += ` -connect ${config.connectNode}`;
+  if (config.dbPassword) args += ` -dbpassword "${config.dbPassword}"`;
+  if (config.archiveMode) args += ' -archive';
+  if (config.megaMMR) args += ' -megammr';
+  return args;
+}
+
+function generateAutoStartWin(installDir, javaCmd) {
+  const startupDir = path.join(os.homedir(), 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+  fs.mkdirSync(startupDir, { recursive: true });
+
+  const { javaPath, jarPath } = buildJavaArgs({}, installDir);
+
+  // A small .bat in the Startup folder that launches Minima minimized
+  const startupScript = `@echo off
+REM Minima Node — Auto-start on login
+REM Generated by minima-installer
+start "Minima Node" /min cmd /c "${javaCmd}"
+`;
+
+  const startupPath = path.join(startupDir, 'Minima.bat');
+  fs.writeFileSync(startupPath, startupScript);
+  return startupPath;
+}
+
+function createDesktopShortcutWin(installDir) {
+  const homeDir = os.homedir();
+  const desktopDir = path.join(homeDir, 'Desktop');
+  const controlPanel = path.join(installDir, 'Minima.bat');
+
+  // Create a small .bat on Desktop that launches the control panel
+  const shortcut = `@echo off
+cd /d "${installDir}"
+call "Minima.bat"
+`;
+  const shortcutPath = path.join(desktopDir, 'Minima.bat');
+  fs.writeFileSync(shortcutPath, shortcut);
+  return shortcutPath;
+}
+
+function launchMinimaWin(javaCmd) {
+  try {
+    // Start Minima in a minimized cmd window
+    execSync(`start "Minima Node" /min cmd /c "${javaCmd}"`, { encoding: 'utf8', shell: 'cmd.exe' });
+    return true;
+  } catch (err) {
+    throw new Error(`Failed to start Minima: ${err.message}`);
+  }
+}
+
+// ============================================================
+//  Main install — dispatches to platform-specific functions
+// ============================================================
+
 async function install(config, sendEvent) {
-  const homeDir = process.env.HOME;
+  const homeDir = os.homedir();
   const installDir = path.join(homeDir, 'minima-installer');
 
   sendEvent('status', 'Preparing installation directory...');
@@ -349,29 +577,45 @@ async function install(config, sendEvent) {
   });
   sendEvent('status', 'Download complete.');
 
-  sendEvent('status', 'Generating Minima control panel...');
-  const { scriptPath, javaCmd, mdsPort } = generateControlPanel(config, installDir);
+  let scriptPath, javaCmd, mdsPort;
 
-  let plistPath = null;
-  if (config.autoStart) {
-    sendEvent('status', 'Setting up auto-start on login...');
-    plistPath = generateLaunchAgent(installDir, javaCmd);
+  if (isWindows) {
+    sendEvent('status', 'Generating Minima control panel...');
+    ({ scriptPath, javaCmd, mdsPort } = generateControlPanelWin(config, installDir));
+
+    if (config.autoStart) {
+      sendEvent('status', 'Setting up auto-start on login...');
+      generateAutoStartWin(installDir, javaCmd);
+    }
+
+    sendEvent('status', 'Starting Minima...');
+    launchMinimaWin(javaCmd);
+
+    sendEvent('status', 'Creating desktop shortcut...');
+    createDesktopShortcutWin(installDir);
+  } else {
+    sendEvent('status', 'Generating Minima control panel...');
+    ({ scriptPath, javaCmd, mdsPort } = generateControlPanelMac(config, installDir));
+
+    if (config.autoStart) {
+      sendEvent('status', 'Setting up auto-start on login...');
+      generateLaunchAgentMac(installDir, javaCmd);
+    }
+
+    sendEvent('status', 'Starting Minima in tmux session...');
+    launchTmuxSession(javaCmd);
+
+    sendEvent('status', 'Creating desktop shortcut...');
+    createDesktopShortcutMac(installDir);
   }
-
-  sendEvent('status', 'Starting Minima in tmux session...');
-  launchTmuxSession(javaCmd);
-
-  sendEvent('status', 'Creating desktop shortcut...');
-  createDesktopShortcut(installDir);
 
   sendEvent('complete', JSON.stringify({
     installDir,
     jarPath,
     controlPanel: scriptPath,
-    plistPath,
     javaCmd,
     mdsPort,
-    tmuxSession: 'minima'
+    tmuxSession: isWindows ? null : 'minima'
   }));
 }
 
