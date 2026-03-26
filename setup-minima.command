@@ -4,7 +4,7 @@
 #  Double-click this file to get started.
 # ============================================================
 
-set -e
+# Don't use set -e — we handle errors explicitly so Homebrew output doesn't kill the script
 
 # Colors for friendly output
 GREEN='\033[0;32m'
@@ -113,6 +113,14 @@ else
   fi
 fi
 
+# ---- Ensure Homebrew is in PATH (Apple Silicon + Intel) ----
+
+if [[ -f /opt/homebrew/bin/brew ]]; then
+  eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [[ -f /usr/local/bin/brew ]]; then
+  eval "$(/usr/local/bin/brew shellenv)"
+fi
+
 # ---- Check/Install Node.js ----
 
 step "Checking for Node.js..."
@@ -126,6 +134,12 @@ else
   if command -v brew &>/dev/null; then
     waiting "Installing Node.js via Homebrew..."
     brew install node
+    # Refresh PATH after install
+    if [[ -f /opt/homebrew/bin/brew ]]; then
+      eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [[ -f /usr/local/bin/brew ]]; then
+      eval "$(/usr/local/bin/brew shellenv)"
+    fi
     if command -v node &>/dev/null; then
       info "Node.js installed: $(node --version)"
     else
